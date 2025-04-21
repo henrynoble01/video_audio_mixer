@@ -2,6 +2,7 @@ import sys
 import os
 import subprocess
 import platform
+import re
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QLineEdit, QPushButton, QFileDialog,
@@ -13,36 +14,66 @@ class FFmpegWorker(QThread):
     progress = pyqtSignal(str)
     finished = pyqtSignal(bool, str)
 
-    def __init__(self, command):
+    def __init__(self, command, video_path):
         super().__init__()
         self.command = command
+        self.video_path = video_path
+        self.total_duration = self.get_video_duration()
+
+    def get_video_duration(self):
+        try:
+            cmd = f'ffmpeg -i "{self.video_path}" 2>&1'
+            result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+            output = result.stderr
+            duration_match = re.search(r"Duration: (\d{2}):(\d{2}):(\d{2})\.\d+", output)
+            if duration_match:
+                hours, minutes, seconds = map(int, duration_match.groups())
+                return hours * 3600 + minutes * 60 + seconds
+            return 0
+        except Exception:
+            return 0
 
     def run(self):
         self.progress.emit("Processing started...")
         try:
-            process = subprocess.run(
+            process = subprocess.Popen(
                 self.command,
                 shell=True,
-                capture_output=True,
-                text=True,
-                check=False
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                universal_newlines=True
             )
+            
+            while True:
+                line = process.stderr.readline()
+                if not line and process.poll() is not None:
+                    break
+                    
+                time_match = re.search(r"time=(\d{2}):(\d{2}):(\d{2})", line)
+                if time_match:
+                    hours, minutes, seconds = map(int, time_match.groups())
+                    current_time = hours * 3600 + minutes * 60 + seconds
+                    if self.total_duration > 0:
+                        percentage = min(round((current_time / self.total_duration) * 100), 100)
+                        self.progress.emit(f"Processing: {percentage}% complete")
+
             if process.returncode == 0:
-                self.progress.emit("Processing finished successfully!")
-                output_message = f"Success!\nOutput:\n{process.stdout}\n{process.stderr}"
+                self.progress.emit("Processing: 100% complete")
+                output_message = "Success!"
                 self.finished.emit(True, output_message)
             else:
-                error_message = f"FFmpeg Error (Code {process.returncode}):\n{process.stderr}"
-                self.progress.emit("Processing failed.")
+                error_message = f"FFmpeg Error (Code {process.returncode})"
+                self.progress.emit("Processing failed")
                 self.finished.emit(False, error_message)
+
         except FileNotFoundError:
-            error_message = "Error: 'ffmpeg' command not found.\nMake sure FFmpeg is installed and added to your system's PATH or provide the full path."
-            self.progress.emit("Processing failed.")
+            error_message = "Error: 'ffmpeg' command not found.\nMake sure FFmpeg is installed and added to your system's PATH."
+            self.progress.emit("Processing failed")
             self.finished.emit(False, error_message)
         except Exception as e:
             import traceback
             error_message = f"An unexpected error occurred: {e}\n{traceback.format_exc()}"
-            self.progress.emit("Processing failed.")
+            self.progress.emit("Processing failed")
             self.finished.emit(False, error_message)
 
 class VideoAudioApp(QWidget):
@@ -197,7 +228,7 @@ class VideoAudioApp(QWidget):
         print(f"Executing command: {command}")
         self.process_button.setEnabled(False)
         self.status_label.setText("Status: Processing...")
-        self.ffmpeg_worker = FFmpegWorker(command)
+        self.ffmpeg_worker = FFmpegWorker(command, self.video_file)
         self.ffmpeg_worker.progress.connect(self.update_status)
         self.ffmpeg_worker.finished.connect(self.on_processing_finished)
         self.ffmpeg_worker.start()
